@@ -1,4 +1,4 @@
-"""Technical accessibility and contextual AEO checks for AI overview readiness."""
+"""Technical accessibility, link density, and DOM weight performance checks."""
 
 from __future__ import annotations
 
@@ -10,14 +10,18 @@ from bs4 import BeautifulSoup, Tag
 
 from .crawler import PageFetch
 
-# Landmarks weighted by AI crawlers for layout chunking
 REQUIRED_LANDMARKS: tuple[str, ...] = ("main", "nav", "header")
 SKIP_HREF_PREFIXES: tuple[str, ...] = ("#", "mailto:", "tel:", "javascript:", "data:")
+
+# DOM weight bloat thresholds
+PAYLOAD_KB_LIMIT: float = 150.0
+SCRIPT_COUNT_LIMIT: int = 15
+DOM_NODE_LIMIT: int = 1500
 
 
 @dataclass
 class TechnicalAuditResult:
-    """Per-page accessibility and internal-link density findings."""
+    """Per-page accessibility, link density, and DOM weight findings."""
 
     url: str
 
@@ -44,6 +48,15 @@ class TechnicalAuditResult:
     link_density_ok: bool
     orphan_risk: bool
 
+    payload_kb: float
+    dom_node_count: int
+    script_count: int
+    stylesheet_count: int
+    inline_style_count: int
+    css_count: int
+    dom_weight_ok: bool
+    dom_weight_status: str
+
     technical_issues: list[str] = field(default_factory=list)
     technical_score: float = 0.0
 
@@ -69,13 +82,21 @@ class TechnicalAuditResult:
             "internal_link_ratio": self.internal_link_ratio,
             "link_density_ok": self.link_density_ok,
             "orphan_risk": self.orphan_risk,
+            "payload_kb": self.payload_kb,
+            "dom_node_count": self.dom_node_count,
+            "script_count": self.script_count,
+            "stylesheet_count": self.stylesheet_count,
+            "inline_style_count": self.inline_style_count,
+            "css_count": self.css_count,
+            "dom_weight_ok": self.dom_weight_ok,
+            "dom_weight_status": self.dom_weight_status,
             "technical_issues": "; ".join(self.technical_issues),
             "technical_score": self.technical_score,
         }
 
 
 class TechnicalAuditor:
-    """Evaluate accessibility attributes, semantic landmarks, and link density."""
+    """Evaluate accessibility attributes, semantic landmarks, link density, and DOM weight."""
 
     def __init__(self, base_url: str = "https://logi-ink.co.za") -> None:
         self.base_url = base_url.rstrip("/")
@@ -122,7 +143,6 @@ class TechnicalAuditor:
         internal, external = self._link_counts(soup, page_url)
         total = internal + external
         ratio = round(internal / total, 3) if total else 0.0
-        # Poorly connected pages: few internal links relative to content graph expectations
         link_density_ok = internal >= 3 and (total == 0 or ratio >= 0.5)
         orphan_risk = internal < 2
         if orphan_risk:
@@ -133,6 +153,22 @@ class TechnicalAuditor:
             issues.append(
                 f"Weak internal link density (ratio {ratio:.0%}; {internal} internal links)"
             )
+
+        script_count, stylesheet_count, inline_style_count = self._asset_counts(soup)
+        css_count = stylesheet_count + inline_style_count
+        payload_kb = page.payload_kb
+        dom_node_count = page.dom_node_count or len(soup.find_all(True))
+        weight_flags: list[str] = []
+        if payload_kb > PAYLOAD_KB_LIMIT:
+            weight_flags.append(f"HTML payload {payload_kb:.1f} KB > {PAYLOAD_KB_LIMIT:.0f} KB")
+        if script_count > SCRIPT_COUNT_LIMIT:
+            weight_flags.append(f"script count {script_count} > {SCRIPT_COUNT_LIMIT}")
+        if dom_node_count > DOM_NODE_LIMIT:
+            weight_flags.append(f"DOM nodes {dom_node_count} > {DOM_NODE_LIMIT}")
+        dom_weight_ok = not weight_flags
+        dom_weight_status = "OK" if dom_weight_ok else "Bloat"
+        for flag in weight_flags:
+            issues.append(f"DOM weight: {flag}")
 
         result = TechnicalAuditResult(
             url=page.url,
@@ -155,6 +191,14 @@ class TechnicalAuditor:
             internal_link_ratio=ratio,
             link_density_ok=link_density_ok,
             orphan_risk=orphan_risk,
+            payload_kb=payload_kb,
+            dom_node_count=dom_node_count,
+            script_count=script_count,
+            stylesheet_count=stylesheet_count,
+            inline_style_count=inline_style_count,
+            css_count=css_count,
+            dom_weight_ok=dom_weight_ok,
+            dom_weight_status=dom_weight_status,
             technical_issues=issues,
         )
         result.technical_score = self._score(result)
@@ -182,6 +226,14 @@ class TechnicalAuditor:
             internal_link_ratio=0.0,
             link_density_ok=False,
             orphan_risk=True,
+            payload_kb=0.0,
+            dom_node_count=0,
+            script_count=0,
+            stylesheet_count=0,
+            inline_style_count=0,
+            css_count=0,
+            dom_weight_ok=False,
+            dom_weight_status="Unknown",
         )
 
     @staticmethod
@@ -209,6 +261,22 @@ class TechnicalAuditor:
             if str(img.get("alt") or "").strip() == "":
                 empty += 1
         return len(images), missing, empty
+
+    @staticmethod
+    def _asset_counts(soup: BeautifulSoup) -> tuple[int, int, int]:
+        """Return (script tags, stylesheet links, inline style tags)."""
+        scripts = len(soup.find_all("script"))
+        stylesheets = 0
+        for link in soup.find_all("link"):
+            if not isinstance(link, Tag):
+                continue
+            rel = link.get("rel")
+            rel_values = rel if isinstance(rel, list) else [rel]
+            normalised = " ".join(str(value).lower() for value in rel_values if value)
+            if "stylesheet" in normalised:
+                stylesheets += 1
+        inline_styles = len(soup.find_all("style"))
+        return scripts, stylesheets, inline_styles
 
     def _link_counts(self, soup: BeautifulSoup, page_url: str) -> tuple[int, int]:
         internal = 0
@@ -246,5 +314,8 @@ class TechnicalAuditor:
             result.landmark_coverage_ok,
             result.link_density_ok,
             not result.orphan_risk,
+            result.dom_weight_ok,
+            result.payload_kb <= PAYLOAD_KB_LIMIT,
+            result.script_count <= SCRIPT_COUNT_LIMIT,
         ]
         return round(100.0 * sum(1 for check in checks if check) / len(checks), 1)

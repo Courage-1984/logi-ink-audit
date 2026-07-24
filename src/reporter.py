@@ -46,6 +46,8 @@ DETAIL_COLUMNS: list[tuple[str, str]] = [
     ("meta_description_present", "Meta Desc Present"),
     ("meta_description_length", "Meta Desc Length"),
     ("meta_description_length_ok", "Meta Desc Length OK"),
+    ("terminology_ok", "Terminology OK"),
+    ("terminology_issues", "Terminology Issues"),
     ("h1_count", "H1 Count"),
     ("heading_hierarchy_ok", "Heading Hierarchy OK"),
     ("heading_skip_detected", "Heading Skip"),
@@ -58,6 +60,12 @@ DETAIL_COLUMNS: list[tuple[str, str]] = [
     ("link_density_ok", "Link Density OK"),
     ("orphan_risk", "Orphan Risk"),
     ("landmark_coverage_ok", "Landmarks (main/nav/header)"),
+    ("payload_kb", "Payload (KB)"),
+    ("script_count", "Script Count"),
+    ("css_count", "CSS Count"),
+    ("dom_node_count", "DOM Node Count"),
+    ("dom_weight_status", "DOM Weight Status"),
+    ("dom_weight_ok", "DOM Weight OK"),
     ("og_title_present", "OG Title"),
     ("og_description_present", "OG Description"),
     ("og_image_present", "OG Image"),
@@ -86,6 +94,12 @@ DETAIL_COLUMNS: list[tuple[str, str]] = [
     ("localisation_gaps", "Localisation Gaps"),
     ("semantic_tags", "Semantic Tags"),
     ("semantic_coverage_ok", "Semantic Coverage OK"),
+    ("has_definition_list", "Definition List (dl/dt/dd)"),
+    ("has_details_summary", "Details/Summary Accordion"),
+    ("has_faq_schema", "FAQ Schema"),
+    ("has_question_headings", "Question Headings"),
+    ("question_heading_count", "Question Heading Count"),
+    ("ai_chunking_ready", "AI Chunking Ready"),
     ("direct_answer_ready", "Direct-Answer Ready"),
     ("has_definition_pattern", "Definition Pattern"),
     ("has_structured_lists", "Structured Lists"),
@@ -204,6 +218,7 @@ class AuditReporter:
         *,
         base_url: str,
         report_date: datetime | None = None,
+        delta: dict[str, Any] | None = None,
     ) -> Path:
         report_date = report_date or datetime.now()
         stamp = report_date.strftime("%d-%m-%Y")
@@ -215,7 +230,7 @@ class AuditReporter:
         overview.title = "Overview"
         detail = workbook.create_sheet("Detailed Results")
 
-        self._build_overview(overview, merged, base_url, report_date)
+        self._build_overview(overview, merged, base_url, report_date, delta=delta or {})
         self._build_detail(detail, merged)
 
         workbook.save(path)
@@ -272,6 +287,20 @@ class AuditReporter:
                 row.setdefault("technical_score", 0.0)
                 row.setdefault("technical_issues", "")
                 row.setdefault("alt_coverage_ok", False)
+                row.setdefault("payload_kb", 0.0)
+                row.setdefault("script_count", 0)
+                row.setdefault("css_count", 0)
+                row.setdefault("dom_node_count", 0)
+                row.setdefault("dom_weight_status", "Unknown")
+                row.setdefault("dom_weight_ok", False)
+            row.setdefault("terminology_issues", "")
+            row.setdefault("terminology_ok", True)
+            row.setdefault("has_definition_list", False)
+            row.setdefault("has_details_summary", False)
+            row.setdefault("has_faq_schema", False)
+            row.setdefault("has_question_headings", False)
+            row.setdefault("question_heading_count", 0)
+            row.setdefault("ai_chunking_ready", False)
             rows.append(row)
         return rows
 
@@ -281,7 +310,21 @@ class AuditReporter:
         rows: list[dict[str, Any]],
         base_url: str,
         report_date: datetime,
+        *,
+        delta: dict[str, Any] | None = None,
     ) -> None:
+        delta = delta or {
+            "has_previous": False,
+            "summary_line": "Initial baseline audit — no previous trend data available",
+            "resolved_count": 0,
+            "new_count": 0,
+            "persistent_count": 0,
+            "previous_name": "",
+            "resolved_issues": [],
+            "new_issues": [],
+            "persistent_issues": [],
+        }
+
         worksheet["A1"] = "Website Audit Overview"
         worksheet["A1"].font = Font(bold=True, size=16, color="111827", name="Calibri")
         worksheet.merge_cells("A1:D1")
@@ -311,6 +354,9 @@ class AuditReporter:
         schema_col = get_column_letter(self._detail_col_index("schema_valid"))
         heading_col = get_column_letter(self._detail_col_index("heading_hierarchy_ok"))
         local_col = get_column_letter(self._detail_col_index("local_seo_status"))
+        term_col = get_column_letter(self._detail_col_index("terminology_ok"))
+        chunk_col = get_column_letter(self._detail_col_index("ai_chunking_ready"))
+        weight_col = get_column_letter(self._detail_col_index("dom_weight_status"))
         last_data_hint = "1000"
 
         pillars = [
@@ -358,17 +404,63 @@ class AuditReporter:
         worksheet["B17"] = (
             f"=COUNTIF('Detailed Results'!{local_col}2:{local_col}{last_data_hint},\"Fail\")"
         )
-
-        worksheet["A19"] = "Scoring notes"
-        worksheet["A19"].font = Font(bold=True)
-        worksheet["A20"] = (
-            "SEO, GEO, AEO, and Technical scores are per-page checklist percentages. "
-            "Local SEO Compliance requires Pretoria / Gauteng / ZA address signals, "
-            "ZAR priceCurrency where Service/Product schemas exist, and html lang=en-ZA. "
-            "Amber highlighting marks localisation failures; red/green mark hard pass/fail checks."
+        worksheet["A18"] = "Pages with terminology issues"
+        worksheet["B18"] = (
+            f"=COUNTIF('Detailed Results'!{term_col}2:{term_col}{last_data_hint},FALSE)"
         )
-        worksheet.merge_cells("A20:D22")
-        worksheet["A20"].alignment = Alignment(wrap_text=True, vertical="top")
+        worksheet["A19"] = "Pages not AI-chunking ready"
+        worksheet["B19"] = (
+            f"=COUNTIF('Detailed Results'!{chunk_col}2:{chunk_col}{last_data_hint},FALSE)"
+        )
+        worksheet["A20"] = "Pages with DOM weight bloat"
+        worksheet["B20"] = (
+            f"=COUNTIF('Detailed Results'!{weight_col}2:{weight_col}{last_data_hint},\"Bloat\")"
+        )
+
+        # Delta Summary
+        worksheet["A22"] = "Delta Summary"
+        worksheet["A22"].fill = SECTION_FILL
+        worksheet["A22"].font = Font(bold=True, color="FFFFFF")
+        worksheet.merge_cells("A22:D22")
+
+        worksheet["A23"] = "Trend status"
+        worksheet["B23"] = str(delta.get("summary_line", ""))
+        worksheet.merge_cells("B23:D23")
+        worksheet["A24"] = "Compared against"
+        worksheet["B24"] = str(delta.get("previous_name") or "(none — baseline)")
+        worksheet["A25"] = "New issues"
+        worksheet["B25"] = int(delta.get("new_count", 0) or 0)
+        worksheet["A26"] = "Resolved issues"
+        worksheet["B26"] = int(delta.get("resolved_count", 0) or 0)
+        worksheet["A27"] = "Persistent issues"
+        worksheet["B27"] = int(delta.get("persistent_count", 0) or 0)
+
+        if delta.get("has_previous"):
+            worksheet["B25"].fill = WARN_FILL if int(delta.get("new_count", 0) or 0) else GOOD_FILL
+            worksheet["B26"].fill = GOOD_FILL
+            worksheet["B27"].fill = WARN_FILL if int(delta.get("persistent_count", 0) or 0) else GOOD_FILL
+
+        worksheet["A29"] = "New issue samples"
+        worksheet["B29"] = "; ".join(list(delta.get("new_issues") or [])[:5]) or "—"
+        worksheet.merge_cells("B29:D30")
+        worksheet["B29"].alignment = Alignment(wrap_text=True, vertical="top")
+
+        worksheet["A31"] = "Resolved issue samples"
+        worksheet["B31"] = "; ".join(list(delta.get("resolved_issues") or [])[:5]) or "—"
+        worksheet.merge_cells("B31:D32")
+        worksheet["B31"].alignment = Alignment(wrap_text=True, vertical="top")
+
+        worksheet["A34"] = "Scoring notes"
+        worksheet["A34"].font = Font(bold=True)
+        worksheet["A35"] = (
+            "SEO, GEO, AEO, and Technical scores are per-page checklist percentages. "
+            "Delta Summary compares critical failures against the latest prior workbook. "
+            "Terminology checks enforce UK English and Logi-Ink brand casing. "
+            "AI chunking rewards dl/dt/dd, details/summary, FAQ schema, and question headings. "
+            "DOM weight flags HTML > 150 KB, > 15 scripts, or > 1,500 DOM nodes."
+        )
+        worksheet.merge_cells("A35:D37")
+        worksheet["A35"].alignment = Alignment(wrap_text=True, vertical="top")
 
         worksheet.conditional_formatting.add(
             "B7:B11",
@@ -384,7 +476,7 @@ class AuditReporter:
         )
 
         worksheet.column_dimensions["A"].width = 42
-        worksheet.column_dimensions["B"].width = 28
+        worksheet.column_dimensions["B"].width = 36
         worksheet.column_dimensions["C"].width = 28
         worksheet.column_dimensions["D"].width = 20
 
@@ -436,6 +528,13 @@ class AuditReporter:
                 "alt_coverage_ok",
                 "landmark_coverage_ok",
                 "html_lang_en_za",
+                "terminology_ok",
+                "has_definition_list",
+                "has_details_summary",
+                "has_faq_schema",
+                "has_question_headings",
+                "ai_chunking_ready",
+                "dom_weight_ok",
             }
         }
 
@@ -520,6 +619,13 @@ class AuditReporter:
             if alt_count > 0:
                 worksheet.cell(row=row_idx, column=alt_idx).fill = WARN_FILL
 
+            weight_idx = self._detail_col_index("dom_weight_status")
+            weight_cell = worksheet.cell(row=row_idx, column=weight_idx)
+            if str(data.get("dom_weight_status", "")).lower() == "bloat":
+                weight_cell.fill = WARN_FILL
+            elif str(data.get("dom_weight_status", "")).lower() == "ok":
+                weight_cell.fill = GOOD_FILL
+
         widths = {
             "url": 42,
             "title": 36,
@@ -533,6 +639,8 @@ class AuditReporter:
             "localisation_gaps": 40,
             "local_seo_status": 28,
             "html_lang": 12,
+            "terminology_issues": 36,
+            "dom_weight_status": 16,
         }
         for col_idx, (key, _) in enumerate(DETAIL_COLUMNS, start=1):
             letter = get_column_letter(col_idx)

@@ -15,6 +15,7 @@ from src.auditor_seo import SeoAuditor
 from src.auditor_technical import TechnicalAuditor
 from src.crawler import AsyncCrawler
 from src.emailer import send_audit_report
+from src.history import analyse_historical_trends
 from src.reporter import AuditReporter, summarise_critical_failures
 
 DEFAULT_BASE_URL = "https://logi-ink.co.za"
@@ -106,16 +107,27 @@ async def run_audit(args: argparse.Namespace) -> Path:
     seo_results = []
     geo_results = []
     technical_results = []
+    logger.info("Evaluating AI chunking patterns and terminology standards...")
     for page in pages:
         logger.info(
-            "Auditing %s [%s] (%.0f ms)",
+            "Auditing %s [%s] (%.0f ms, %.1f KB, %d DOM nodes)",
             page.url,
             page.status_code or "ERR",
             page.latency_ms,
+            page.payload_kb,
+            page.dom_node_count,
         )
         seo_results.append(seo_auditor.audit(page))
         geo_results.append(geo_auditor.audit(page))
         technical_results.append(technical_auditor.audit(page))
+
+    delta = analyse_historical_trends(
+        args.output_dir,
+        seo_results,
+        geo_results,
+        technical_results,
+        as_of=datetime.now(),
+    )
 
     reporter = AuditReporter(output_dir=args.output_dir)
     report_path = reporter.write(
@@ -124,6 +136,7 @@ async def run_audit(args: argparse.Namespace) -> Path:
         technical_results,
         base_url=args.base_url,
         report_date=datetime.now(),
+        delta=delta,
     )
 
     critical_summary = summarise_critical_failures(
@@ -139,12 +152,19 @@ async def run_audit(args: argparse.Namespace) -> Path:
         technical_results
     )
     local_pass = sum(1 for result in geo_results if result.local_seo_compliance)
+    terminology_flags = sum(1 for result in seo_results if not result.terminology_ok)
+    chunk_ready = sum(1 for result in geo_results if result.ai_chunking_ready)
+    bloat_pages = sum(1 for result in technical_results if not result.dom_weight_ok)
     logger.info("Pages audited : %d", len(pages))
     logger.info("Average SEO   : %.1f%%", avg_seo)
     logger.info("Average GEO   : %.1f%%", avg_geo)
     logger.info("Average AEO   : %.1f%%", avg_aeo)
     logger.info("Average Tech  : %.1f%%", avg_technical)
     logger.info("SA local Pass : %d / %d", local_pass, len(geo_results))
+    logger.info("Terminology   : %d page(s) with issues", terminology_flags)
+    logger.info("AI chunking   : %d / %d ready", chunk_ready, len(geo_results))
+    logger.info("DOM bloat     : %d page(s)", bloat_pages)
+    logger.info("Delta summary : %s", delta.get("summary_line", ""))
     logger.info("Critical fails: %d", len(critical_summary))
     for line in critical_summary[:20]:
         logger.warning("  %s", line)
@@ -159,6 +179,7 @@ async def run_audit(args: argparse.Namespace) -> Path:
             str(report_path.resolve()),
             critical_summary,
             base_url=args.base_url,
+            delta=delta,
         )
 
     return report_path

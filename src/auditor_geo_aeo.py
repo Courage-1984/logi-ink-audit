@@ -112,6 +112,14 @@ class GeoAeoAuditResult:
     has_summary_block: bool
     direct_answer_ready: bool
 
+    # Advanced AI chunking / Q&A patterns
+    has_definition_list: bool
+    has_details_summary: bool
+    has_faq_schema: bool
+    has_question_headings: bool
+    question_heading_count: int
+    ai_chunking_ready: bool
+
     nap_name_found: bool
     nap_address_found: bool
     nap_phone_found: bool
@@ -162,6 +170,12 @@ class GeoAeoAuditResult:
             "has_structured_lists": self.has_structured_lists,
             "has_summary_block": self.has_summary_block,
             "direct_answer_ready": self.direct_answer_ready,
+            "has_definition_list": self.has_definition_list,
+            "has_details_summary": self.has_details_summary,
+            "has_faq_schema": self.has_faq_schema,
+            "has_question_headings": self.has_question_headings,
+            "question_heading_count": self.question_heading_count,
+            "ai_chunking_ready": self.ai_chunking_ready,
             "nap_name_found": self.nap_name_found,
             "nap_address_found": self.nap_address_found,
             "nap_phone_found": self.nap_phone_found,
@@ -251,15 +265,51 @@ class GeoAeoAuditor:
         )
         has_lists = structured_lists > 0
         has_summary = self._has_summary_block(soup)
-        answer_signals = sum([has_definition, has_kv, has_lists, has_summary])
+
+        logger.debug("Evaluating AI chunking patterns for %s", page.url)
+        has_definition_list = self._has_definition_list(soup)
+        has_details_summary = self._has_details_summary(soup)
+        has_faq_schema = any(
+            schema_type in {"FAQPage", "Question", "Answer"} for schema_type in schema_types
+        )
+        question_heading_count = self._count_question_headings(soup)
+        has_question_headings = question_heading_count > 0
+        chunking_signals = sum(
+            [
+                has_definition_list,
+                has_details_summary,
+                has_faq_schema,
+                has_question_headings,
+            ]
+        )
+        ai_chunking_ready = chunking_signals >= 2 or (
+            has_faq_schema and (has_definition_list or has_question_headings)
+        )
+
+        answer_signals = sum(
+            [
+                has_definition,
+                has_kv,
+                has_lists,
+                has_summary,
+                has_definition_list,
+                has_details_summary,
+                has_faq_schema,
+                has_question_headings,
+            ]
+        )
         direct_answer_blocks = answer_signals
         direct_ready = answer_signals >= 2
-        if not has_definition:
+        if not has_definition and not has_definition_list:
             aeo_issues.append("No clear definition / direct-answer phrasing detected")
-        if not has_lists:
+        if not has_lists and not has_definition_list:
             aeo_issues.append("No structured lists suitable for AI extraction")
-        if not has_summary:
+        if not has_summary and not has_details_summary:
             aeo_issues.append("No standalone summary / lead block detected")
+        if not has_faq_schema and not has_question_headings:
+            aeo_issues.append("No FAQ schema or question-style headings for Q&A extraction")
+        if not ai_chunking_ready:
+            aeo_issues.append("Limited AI chunking patterns (dl/details/FAQ/question headings)")
         if not direct_ready:
             aeo_issues.append("Page is not yet direct-answer ready")
 
@@ -313,6 +363,12 @@ class GeoAeoAuditor:
             has_structured_lists=has_lists,
             has_summary_block=has_summary,
             direct_answer_ready=direct_ready,
+            has_definition_list=has_definition_list,
+            has_details_summary=has_details_summary,
+            has_faq_schema=has_faq_schema,
+            has_question_headings=has_question_headings,
+            question_heading_count=question_heading_count,
+            ai_chunking_ready=ai_chunking_ready,
             nap_name_found=nap_name,
             nap_address_found=nap_address,
             nap_phone_found=nap_phone,
@@ -365,6 +421,12 @@ class GeoAeoAuditor:
             has_structured_lists=False,
             has_summary_block=False,
             direct_answer_ready=False,
+            has_definition_list=False,
+            has_details_summary=False,
+            has_faq_schema=False,
+            has_question_headings=False,
+            question_heading_count=0,
+            ai_chunking_ready=False,
             nap_name_found=False,
             nap_address_found=False,
             nap_phone_found=False,
@@ -733,6 +795,48 @@ class GeoAeoAuditor:
         return False
 
     @staticmethod
+    def _has_definition_list(soup: BeautifulSoup) -> bool:
+        """Detect semantic definition lists suitable for AI extraction."""
+        for definition_list in soup.find_all("dl"):
+            terms = definition_list.find_all("dt", recursive=False)
+            descriptions = definition_list.find_all("dd", recursive=False)
+            if terms and descriptions:
+                return True
+            # Nested variants still count when both exist under the list
+            if definition_list.find("dt") and definition_list.find("dd"):
+                return True
+        return False
+
+    @staticmethod
+    def _has_details_summary(soup: BeautifulSoup) -> bool:
+        """Detect accordion / collapsible patterns."""
+        for details in soup.find_all("details"):
+            if details.find("summary"):
+                return True
+        return False
+
+    @staticmethod
+    def _count_question_headings(soup: BeautifulSoup) -> int:
+        """Count H2/H3 question headings followed immediately by a paragraph or list."""
+        count = 0
+        for heading in soup.find_all(["h2", "h3"]):
+            text = heading.get_text(" ", strip=True)
+            if not text.endswith("?"):
+                continue
+            sibling = heading.find_next_sibling()
+            while sibling is not None and getattr(sibling, "name", None) is None:
+                sibling = sibling.find_next_sibling()
+            if sibling is None:
+                continue
+            if sibling.name in {"p", "ul", "ol", "div"}:
+                # div only counts when it contains a paragraph or list
+                if sibling.name == "div" and not sibling.find(["p", "ul", "ol"], recursive=False):
+                    if not sibling.get_text(strip=True):
+                        continue
+                count += 1
+        return count
+
+    @staticmethod
     def _geo_score(result: GeoAeoAuditResult) -> float:
         checks = [
             result.schema_valid,
@@ -764,5 +868,10 @@ class GeoAeoAuditor:
             result.semantic_coverage_ok,
             result.schema_valid,
             result.has_service or result.has_organization,
+            result.has_definition_list,
+            result.has_details_summary,
+            result.has_faq_schema,
+            result.has_question_headings,
+            result.ai_chunking_ready,
         ]
         return round(100.0 * sum(1 for check in checks if check) / len(checks), 1)

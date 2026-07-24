@@ -79,12 +79,26 @@ def load_smtp_config() -> dict[str, str | int] | None:
     }
 
 
-def build_email_body(critical_summary: Sequence[str], *, base_url: str = "") -> str:
-    """Construct the plain-text email body from critical failure lines."""
+def build_email_body(
+    critical_summary: Sequence[str],
+    *,
+    base_url: str = "",
+    delta: dict | None = None,
+) -> str:
+    """Construct the plain-text email body from critical failures and delta summary."""
     site_line = f"Target site: {base_url}\n" if base_url else ""
+    delta = delta or {}
+    delta_line = str(delta.get("summary_line") or "").strip()
+    delta_block = (
+        f"Delta Summary: {delta_line}\n\n"
+        if delta_line
+        else ""
+    )
+
     if not critical_summary:
         return (
             f"{site_line}"
+            f"{delta_block}"
             "All critical SEO and GEO checks passed successfully.\n\n"
             "The full Excel workbook is attached for detailed review.\n"
         )
@@ -92,6 +106,7 @@ def build_email_body(critical_summary: Sequence[str], *, base_url: str = "") -> 
     bullets = "\n".join(f"• {line}" for line in critical_summary)
     return (
         f"{site_line}"
+        f"{delta_block}"
         "Critical SEO and GEO failures detected:\n\n"
         f"{bullets}\n\n"
         "The full Excel workbook is attached for detailed review.\n"
@@ -103,6 +118,7 @@ def send_audit_report(
     critical_summary: list,
     *,
     base_url: str = "",
+    delta: dict | None = None,
 ) -> bool:
     """
     Email the Excel audit report with an embedded critical-failure summary.
@@ -132,7 +148,11 @@ def send_audit_report(
     message["From"] = str(config["sender"])
     message["To"] = str(config["recipient"])
     message.attach(
-        MIMEText(build_email_body(critical_summary, base_url=base_url), "plain", "utf-8")
+        MIMEText(
+            build_email_body(critical_summary, base_url=base_url, delta=delta),
+            "plain",
+            "utf-8",
+        )
     )
 
     attachment = MIMEBase(XLSX_MIME_MAINTYPE, XLSX_MIME_SUBTYPE)

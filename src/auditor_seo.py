@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, NavigableString, Tag
 
 from .crawler import PageFetch
 
@@ -16,9 +16,40 @@ EXPECTED_OG_IMAGE_SUFFIXES = (
     "/assets/images/og-image.png",
     "/assets/images/portfolio/",
 )
+PREFERRED_BRAND: str = "Logi-Ink"
+PREFERRED_HUB_PHRASE: str = "Content Optimisation Hub"
+AMERICAN_HUB_PHRASE: str = "Content Optimization Hub"
+
+# Americanised spellings → preferred UK forms (scanned in visible text / metadata only)
+AMERICAN_TO_UK: tuple[tuple[str, str], ...] = (
+    ("optimization", "optimisation"),
+    ("optimize", "optimise"),
+    ("optimized", "optimised"),
+    ("optimizing", "optimising"),
+    ("organization", "organisation"),
+    ("organizations", "organisations"),
+    ("organize", "organise"),
+    ("organized", "organised"),
+    ("organizing", "organising"),
+    ("center", "centre"),
+    ("centers", "centres"),
+    ("color", "colour"),
+    ("colors", "colours"),
+    ("behavior", "behaviour"),
+    ("behaviors", "behaviours"),
+    ("favor", "favour"),
+    ("favorite", "favourite"),
+    ("analyze", "analyse"),
+    ("analyzing", "analysing"),
+    ("analyzed", "analysed"),
+)
 
 TITLE_MIN, TITLE_MAX = 30, 60
 DESC_MIN, DESC_MAX = 70, 160
+
+SKIP_TERMINOLOGY_TAGS: frozenset[str] = frozenset(
+    {"script", "style", "code", "pre", "noscript", "svg", "path", "textarea"}
+)
 
 
 @dataclass
@@ -63,6 +94,9 @@ class SeoAuditResult:
     canonical_present: bool
     canonical_ok: bool
 
+    terminology_issues: list[str] = field(default_factory=list)
+    terminology_ok: bool = True
+
     issues: list[str] = field(default_factory=list)
     score: float = 0.0
 
@@ -100,6 +134,8 @@ class SeoAuditResult:
             "canonical": self.canonical,
             "canonical_present": self.canonical_present,
             "canonical_ok": self.canonical_ok,
+            "terminology_issues": "; ".join(self.terminology_issues),
+            "terminology_ok": self.terminology_ok,
             "seo_issues": "; ".join(self.issues),
             "seo_score": self.score,
         }
@@ -197,6 +233,18 @@ class SeoAuditor:
         elif not canonical_ok:
             issues.append("Canonical does not align with page URL")
 
+        terminology_issues = self._terminology_issues(
+            soup,
+            title=title,
+            meta_description=meta_description,
+            og_title=og_title,
+            og_description=og_description,
+            h1_text=h1_text,
+        )
+        terminology_ok = not terminology_issues
+        if terminology_issues:
+            issues.extend(terminology_issues[:5])
+
         result = SeoAuditResult(
             url=page.url,
             status_code=page.status_code,
@@ -230,6 +278,8 @@ class SeoAuditor:
             canonical=canonical,
             canonical_present=canonical_present,
             canonical_ok=canonical_ok,
+            terminology_issues=terminology_issues,
+            terminology_ok=terminology_ok,
             issues=issues,
         )
         result.score = self._score(result)
@@ -269,6 +319,8 @@ class SeoAuditor:
             canonical="",
             canonical_present=False,
             canonical_ok=False,
+            terminology_issues=[],
+            terminology_ok=False,
             issues=issues,
         )
 
@@ -352,6 +404,85 @@ class SeoAuditor:
             return True
         return any(token in lowered for token in BRAND_TOKENS)
 
+    def _terminology_issues(
+        self,
+        soup: BeautifulSoup,
+        *,
+        title: str,
+        meta_description: str,
+        og_title: str,
+        og_description: str,
+        h1_text: str,
+    ) -> list[str]:
+        """Flag Americanised spellings and brand casing in user-facing copy only."""
+        findings: list[str] = []
+        samples = [
+            ("title", title),
+            ("meta description", meta_description),
+            ("og:title", og_title),
+            ("og:description", og_description),
+            ("H1", h1_text),
+        ]
+        body_text = self._visible_body_text(soup)
+        samples.append(("body copy", body_text))
+
+        for label, text in samples:
+            if not text:
+                continue
+            findings.extend(self._american_spelling_hits(text, label))
+            findings.extend(self._brand_casing_hits(text, label))
+
+        # De-duplicate whilst preserving order
+        seen: set[str] = set()
+        unique: list[str] = []
+        for item in findings:
+            if item not in seen:
+                seen.add(item)
+                unique.append(item)
+        return unique
+
+    @staticmethod
+    def _visible_body_text(soup: BeautifulSoup) -> str:
+        chunks: list[str] = []
+        root = soup.find("main") or soup.find("article") or soup.body or soup
+        for element in root.descendants:
+            if isinstance(element, NavigableString):
+                parent = element.parent
+                if parent is None or parent.name in SKIP_TERMINOLOGY_TAGS:
+                    continue
+                text = str(element).strip()
+                if text:
+                    chunks.append(text)
+        return " ".join(chunks)
+
+    @staticmethod
+    def _american_spelling_hits(text: str, label: str) -> list[str]:
+        hits: list[str] = []
+        lowered = text.lower()
+        for american, british in AMERICAN_TO_UK:
+            pattern = re.compile(rf"\b{re.escape(american)}\b", re.IGNORECASE)
+            if pattern.search(lowered):
+                hits.append(
+                    f"Americanised spelling in {label}: '{american}' (prefer '{british}')"
+                )
+        if AMERICAN_HUB_PHRASE.lower() in lowered:
+            hits.append(
+                f"Americanised hub phrasing in {label}: "
+                f"'{AMERICAN_HUB_PHRASE}' (prefer '{PREFERRED_HUB_PHRASE}')"
+            )
+        return hits
+
+    def _brand_casing_hits(self, text: str, label: str) -> list[str]:
+        hits: list[str] = []
+        # Flag near-brand tokens that are not exact Logi-Ink casing
+        for match in re.finditer(r"\bLogi[\s\-]?Ink\b", text, flags=re.IGNORECASE):
+            token = match.group(0)
+            if token != PREFERRED_BRAND:
+                hits.append(
+                    f"Brand casing in {label}: '{token}' (prefer '{PREFERRED_BRAND}')"
+                )
+        return hits
+
     def _og_image_path_ok(self, og_image: str, page_url: str) -> bool:
         if not og_image:
             return False
@@ -389,6 +520,7 @@ class SeoAuditor:
             result.og_image_path_ok,
             result.canonical_present,
             result.canonical_ok,
+            result.terminology_ok,
         ]
         if not checks:
             return 0.0

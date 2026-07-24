@@ -38,6 +38,8 @@ class PageFetch:
     redirected: bool
     redirect_chain: list[str] = field(default_factory=list)
     error: str | None = None
+    payload_kb: float = 0.0
+    dom_node_count: int = 0
 
     @property
     def ok(self) -> bool:
@@ -130,6 +132,12 @@ class AsyncCrawler:
                     for hist in response.history:
                         redirect_chain.append(str(hist.url))
 
+                    payload_kb = round(len(body) / 1024.0, 2)
+                    dom_node_count = 0
+                    if html:
+                        parsed = BeautifulSoup(html, "lxml")
+                        dom_node_count = len(parsed.find_all(True))
+
                     return PageFetch(
                         url=url,
                         final_url=str(response.url),
@@ -139,6 +147,8 @@ class AsyncCrawler:
                         content_type=content_type,
                         redirected=bool(response.history),
                         redirect_chain=redirect_chain,
+                        payload_kb=payload_kb,
+                        dom_node_count=dom_node_count,
                     )
             except asyncio.TimeoutError:
                 latency_ms = (time.perf_counter() - started) * 1000
@@ -151,6 +161,8 @@ class AsyncCrawler:
                     content_type="",
                     redirected=False,
                     error="Request timed out",
+                    payload_kb=0.0,
+                    dom_node_count=0,
                 )
             except aiohttp.ClientError as exc:
                 latency_ms = (time.perf_counter() - started) * 1000
@@ -163,6 +175,8 @@ class AsyncCrawler:
                     content_type="",
                     redirected=False,
                     error=f"Client error: {exc}",
+                    payload_kb=0.0,
+                    dom_node_count=0,
                 )
 
     async def _parse_sitemap(
