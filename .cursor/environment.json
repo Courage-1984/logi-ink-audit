@@ -1,0 +1,18 @@
+{
+  "name": "logi-ink-audit",
+  "install": "pip install -r requirements.txt",
+  "start": "python main.py --base-url https://logi-ink.co.za",
+  "env": {
+    "SMTP_SENDER_EMAIL": "your-sender@example.com",
+    "SMTP_RECIPIENT_EMAIL": "your-recipient@example.com",
+    "SMTP_PASSWORD": "your-app-password-here",
+    "SMTP_SERVER": "smtp.gmail.com",
+    "SMTP_PORT": "587"
+  },
+  "terminals": [
+    {
+      "name": "audit",
+      "command": "python main.py --base-url https://logi-ink.co.za"
+    }
+  ]
+}

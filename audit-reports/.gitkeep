@@ -1,0 +1,7 @@
+# Audit reports
+
+Generated Excel workbooks are written here as:
+
+`live-audit-DD-MM-YYYY.xlsx`
+
+This folder is created automatically by the reporter if missing.
